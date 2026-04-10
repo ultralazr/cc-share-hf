@@ -3,7 +3,7 @@ import readline from "node:readline";
 import { red } from "./colors.ts";
 import type { GrepOptions, JsonValue, ListOptions } from "./types.ts";
 import { loadReviewFile } from "./review-state.ts";
-import { REJECT_FILE } from "./types.ts";
+import { APPROVE_FILE, REJECT_FILE } from "./types.ts";
 import { isRecord, loadLocalManifest, workspacePath } from "./workspace.ts";
 
 function loadRejectSet(workspace: string): Set<string> {
@@ -12,22 +12,33 @@ function loadRejectSet(workspace: string): Set<string> {
   return new Set(fs.readFileSync(file, "utf-8").split("\n").map((line) => line.trim()).filter(Boolean));
 }
 
+function loadApproveSet(workspace: string): Set<string> {
+  const file = workspacePath(workspace, APPROVE_FILE);
+  if (!fs.existsSync(file)) return new Set();
+  return new Set(fs.readFileSync(file, "utf-8").split("\n").map((line) => line.trim()).filter(Boolean));
+}
+
 export function getUploadableSessionPaths(workspace: string): string[] {
   const redactedDir = workspacePath(workspace, "redacted");
   const rejectedByUser = loadRejectSet(workspace);
+  const approvedByUser = loadApproveSet(workspace);
   const localManifest = loadLocalManifest(workspacePath(workspace, "manifest.local.jsonl"));
   if (localManifest.size === 0) return [];
 
   const paths: string[] = [];
   for (const entry of [...localManifest.values()].sort((a, b) => a.file.localeCompare(b.file))) {
     const sessionFile = entry.file;
-    const review = loadReviewFile(workspacePath(workspace, "review", `${sessionFile}.review.json`));
-    if (!review) continue;
     if (rejectedByUser.has(sessionFile)) continue;
-    const aggregate = review.aggregate;
-    if (aggregate.shareable !== "yes") continue;
-    if (aggregate.missed_sensitive_data !== "no") continue;
-    if (aggregate.about_project === "no") continue;
+
+    const manuallyApproved = approvedByUser.has(sessionFile);
+    if (!manuallyApproved) {
+      const review = loadReviewFile(workspacePath(workspace, "review", `${sessionFile}.review.json`));
+      if (!review) continue;
+      const aggregate = review.aggregate;
+      if (aggregate.shareable !== "yes") continue;
+      if (aggregate.missed_sensitive_data !== "no") continue;
+      if (aggregate.about_project === "no") continue;
+    }
 
     const sessionPath = workspacePath(redactedDir, sessionFile);
     if (fs.existsSync(sessionPath)) paths.push(sessionPath);

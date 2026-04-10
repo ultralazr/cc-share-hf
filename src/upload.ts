@@ -3,13 +3,19 @@ import path from "node:path";
 import { bold, cyan, green, red, yellow } from "./colors.ts";
 import { uploadDatasetFolder } from "./hf.ts";
 import type { ChunkReviewResult, UploadOptions } from "./types.ts";
-import { REJECT_FILE, REMOTE_MANIFEST_CACHE_FILE, REMOTE_MANIFEST_FILE } from "./types.ts";
+import { APPROVE_FILE, REJECT_FILE, REMOTE_MANIFEST_CACHE_FILE, REMOTE_MANIFEST_FILE } from "./types.ts";
 import { runCommand } from "./process.ts";
 import { loadReviewFile } from "./review-state.ts";
 import { downloadRemoteManifest, loadLocalManifest, readWorkspaceConfig, workspacePath } from "./workspace.ts";
 
 function loadRejectSet(workspace: string): Set<string> {
   const file = workspacePath(workspace, REJECT_FILE);
+  if (!fs.existsSync(file)) return new Set();
+  return new Set(fs.readFileSync(file, "utf-8").split("\n").map((line) => line.trim()).filter(Boolean));
+}
+
+function loadApproveSet(workspace: string): Set<string> {
+  const file = workspacePath(workspace, APPROVE_FILE);
   if (!fs.existsSync(file)) return new Set();
   return new Set(fs.readFileSync(file, "utf-8").split("\n").map((line) => line.trim()).filter(Boolean));
 }
@@ -25,6 +31,7 @@ export async function runUpload(options: UploadOptions): Promise<void> {
   }
 
   const rejectedByUser = loadRejectSet(options.workspace);
+  const approvedByUser = loadApproveSet(options.workspace);
   const entries = [...localManifest.values()].sort((a, b) => a.file.localeCompare(b.file));
   let approved = 0;
   let rejected = 0;
@@ -49,11 +56,12 @@ export async function runUpload(options: UploadOptions): Promise<void> {
       missingLocal++;
       continue;
     }
-    if (!reviewFile) {
+    const manuallyApproved = approvedByUser.has(entry.file);
+    if (!reviewFile && !manuallyApproved) {
       noReview++;
       continue;
     }
-    if (hasReviewErrors(reviewFile) || !isUploadApproved(reviewFile.aggregate)) {
+    if (!manuallyApproved && (hasReviewErrors(reviewFile!) || !isUploadApproved(reviewFile!.aggregate))) {
       rejected++;
       continue;
     }
@@ -97,8 +105,9 @@ export async function runUpload(options: UploadOptions): Promise<void> {
 
   for (const entry of entries) {
     const reviewFile = loadReviewFile(workspacePath(options.workspace, "review", `${entry.file}.review.json`));
+    const manuallyApproved = approvedByUser.has(entry.file);
     if (rejectedByUser.has(entry.file)) continue;
-    if (!reviewFile || hasReviewErrors(reviewFile) || !isUploadApproved(reviewFile.aggregate)) continue;
+    if (!manuallyApproved && (!reviewFile || hasReviewErrors(reviewFile) || !isUploadApproved(reviewFile.aggregate))) continue;
 
     const remoteEntry = remoteManifest.get(entry.file);
     if (remoteEntry?.redacted_hash === entry.redacted_hash) continue;
@@ -106,7 +115,13 @@ export async function runUpload(options: UploadOptions): Promise<void> {
     const localFile = workspacePath(options.workspace, "redacted", entry.file);
     if (!fs.existsSync(localFile)) continue;
 
-    fs.copyFileSync(localFile, path.join(uploadDir, entry.file));
+    const sessionId = entry.file.endsWith(".jsonl") ? entry.file.slice(0, -".jsonl".length) : entry.file;
+    const rawLines = fs.readFileSync(localFile, "utf-8").split("\n").filter((l) => l.trim() !== "");
+    const traces = rawLines.map((line) => {
+      try { return JSON.parse(line); } catch { return line; }
+    });
+    const row = JSON.stringify({ harness: "claude-code", session_id: sessionId, traces, file_name: entry.file });
+    fs.writeFileSync(path.join(uploadDir, entry.file), `${row}\n`);
     updatedManifest.set(entry.file, {
       file: entry.file,
       source_hash: entry.source_hash,
@@ -146,38 +161,44 @@ async function generateDatasetCard(
   const sourceRepo = await resolveGitOrigin(cwd);
   const lines = [
     "---",
-    "pretty_name: coding agent session traces",
+    "pretty_name: Claude Code session traces",
     "task_categories:",
     "- text-generation",
     "tags:",
     "- agent-traces",
     "- coding-agent",
-    "- pi-share-hf",
+    "- claude-code",
+    "- cc-share-hf",
     "language:",
     "- en",
     "- code",
     "license: other",
     "---",
     "",
-    `# Coding agent session traces for ${repo}`,
+    `# Claude Code session traces for ${repo}`,
     "",
     sourceRepo
-      ? `This dataset contains redacted coding agent session traces collected while working on ${sourceRepo}. The traces were exported with [pi-share-hf](https://github.com/badlogic/pi-share-hf) from a local [pi](https://pi.dev) workspace and filtered to keep only sessions that passed deterministic redaction and LLM review.`
-      : `This dataset contains redacted coding agent session traces exported with [pi-share-hf](https://github.com/badlogic/pi-share-hf) from a local [pi](https://pi.dev) workspace. The traces were filtered to keep only sessions that passed deterministic redaction and LLM review.`,
+      ? `This dataset contains redacted Claude Code session traces collected while working on ${sourceRepo}. The traces were exported with [cc-share-hf](https://github.com/badlogic/cc-share-hf) and filtered to keep only sessions that passed deterministic redaction and LLM review.`
+      : `This dataset contains redacted Claude Code session traces exported with [cc-share-hf](https://github.com/badlogic/cc-share-hf). The traces were filtered to keep only sessions that passed deterministic redaction and LLM review.`,
     "",
     "## Data description",
     "",
-    "Each `*.jsonl` file is a redacted pi session. Sessions are stored as JSON Lines files where each line is a structured session entry. Entries include session headers, user and assistant messages, tool results, model changes, thinking level changes, compaction summaries, branch summaries, and custom extension data.",
+    "Each row in the dataset corresponds to one Claude Code session and has four columns:",
     "",
-    "Pi session files are tree-structured via `id` and `parentId`, so a single session file may contain multiple branches of work. See the upstream session format documentation for the exact schema:",
+    "| Column | Type | Description |",
+    "| --- | --- | --- |",
+    "| `harness` | string | Always `claude-code` — identifies the agent that produced the traces |",
+    "| `session_id` | string | UUID matching the session filename (without `.jsonl`) |",
+    "| `traces` | list | Array of parsed JSONL entries from the redacted session file |",
+    "| `file_name` | string | Original session filename (e.g. `abc123.jsonl`) |",
     "",
-    "- https://github.com/badlogic/pi-mono/blob/main/packages/coding-agent/docs/session.md",
+    "Each entry in `traces` is a structured Claude Code session entry. Entry types include `user`, `assistant`, `system`, and `custom-title`. Assistant entries may contain `text`, `tool_use`, and `thinking` content blocks. User entries may contain plain text or `tool_result` blocks.",
     "",
     sourceRepo ? `Source git repo: ${sourceRepo}` : "Source git repo: (not detected)",
     "",
     "## Redaction and review",
     "",
-    "The data was processed with [pi-share-hf](https://github.com/badlogic/pi-share-hf) using deterministic secret redaction plus an LLM review step. Deterministic redaction targets exact known secrets and curated credential patterns. The LLM review decides whether a session is about the OSS project, whether it is fit to share publicly, and whether any sensitive content appears to have been missed.",
+    "The data was processed with [cc-share-hf](https://github.com/badlogic/cc-share-hf) using deterministic secret redaction plus an LLM review step. Deterministic redaction targets exact known secrets and curated credential patterns. The LLM review decides whether a session is about the OSS project, whether it is fit to share publicly, and whether any sensitive content appears to have been missed.",
     "",
     "Embedded images may be preserved in the uploaded sessions unless the workspace was initialized with `--no-images`.",
     "",

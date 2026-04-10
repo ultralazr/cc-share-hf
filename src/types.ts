@@ -26,7 +26,6 @@ export interface CollectOptions {
   secrets: string[];
   force: boolean;
   contextFiles: string[];
-  provider?: string;
   model?: string;
   thinking?: string;
   parallel: number;
@@ -37,7 +36,6 @@ export interface CollectOptions {
 export interface ReviewOptions {
   workspace: string;
   contextFiles: string[];
-  provider?: string;
   model?: string;
   thinking?: string;
   parallel: number;
@@ -78,6 +76,11 @@ export interface UploadOptions {
 }
 
 export interface RejectOptions {
+  workspace: string;
+  target: string;
+}
+
+export interface ApproveOptions {
   workspace: string;
   target: string;
 }
@@ -144,7 +147,6 @@ export interface SessionReviewFile {
   file: string;
   context_files: string[];
   context_hashes: Record<string, string>;
-  provider?: string;
   model?: string;
   redacted_hash: string;
   review_key: string;
@@ -171,6 +173,7 @@ export const WORKSPACE_CONFIG_FILE = "workspace.json";
 export const LOCAL_MANIFEST_FILE = "manifest.local.jsonl";
 export const REMOTE_MANIFEST_CACHE_FILE = "remote-manifest.jsonl";
 export const REJECT_FILE = "reject.txt";
+export const APPROVE_FILE = "approve.txt";
 export const REVIEW_TOOL_RESULT_MAX_CHARS = 2000;
 export const REVIEW_JSON_VALUE_MAX_CHARS = 4000;
 export const TRUFFLEHOG_REPORT_SUFFIX = ".trufflehog.json";

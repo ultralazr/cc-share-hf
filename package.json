@@ -1,6 +1,6 @@
 {
-  "name": "pi-share-hf",
-  "version": "0.5.0",
+  "name": "cc-share-hf",
+  "version": "0.1.0",
   "type": "module",
   "bin": "dist/index.js",
   "files": [
@@ -12,6 +12,7 @@
     "check": "tsgo --noEmit && node --experimental-strip-types src/index.ts --help >/dev/null && node --experimental-strip-types src/index.ts init --help >/dev/null && node --experimental-strip-types src/index.ts collect --help >/dev/null && node --experimental-strip-types src/index.ts review --help >/dev/null && node --experimental-strip-types src/index.ts upload --help >/dev/null && node --experimental-strip-types src/index.ts reject --help >/dev/null && node --experimental-strip-types src/index.ts list --help >/dev/null && node --experimental-strip-types src/index.ts grep --help >/dev/null"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.87.0",
     "@huggingface/hub": "^2.11.0"
   },
   "devDependencies": {

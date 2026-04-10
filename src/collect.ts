@@ -214,7 +214,6 @@ export async function runCollect(options: CollectOptions): Promise<void> {
   const reviewOptions: ReviewOptions = {
     workspace: options.workspace,
     contextFiles: options.contextFiles,
-    provider: options.provider,
     model: options.model,
     thinking: options.thinking,
     parallel: options.parallel,
@@ -229,10 +228,12 @@ function createRedactionKey(sourceHash: string, secretsHash: string, noImages: b
 }
 
 function findSessionDir(cwd: string): string {
-  const sessionsBase = path.join(os.homedir(), ".pi", "agent", "sessions");
-  const dir = path.join(sessionsBase, cwdToSessionDirName(cwd));
+  const projectsBase = path.join(os.homedir(), ".claude", "projects");
+  const dir = path.join(projectsBase, cwdToSessionDirName(cwd));
   if (!fs.existsSync(dir)) {
-    throw new Error(`Session directory not found for cwd: ${cwd}`);
+    throw new Error(
+      `Claude Code project directory not found: ${dir}\nMake sure you have run Claude Code at least once in: ${cwd}`,
+    );
   }
   return dir;
 }

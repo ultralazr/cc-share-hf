@@ -23,7 +23,15 @@ export class Redactor {
     if (value === null) return { value, findings: [] };
 
     if (typeof value === "string") {
-      if (parentKey === "data" && parentObject && typeof parentObject.mimeType === "string" && value.length > 256) {
+      // Detect base64 image payloads.
+      // pi format:          { data: "...", mimeType: "image/png" }
+      // Claude Code format: { data: "...", media_type: "image/png", type: "base64" }
+      const imageMime = typeof parentObject?.mimeType === "string"
+        ? parentObject.mimeType
+        : typeof parentObject?.media_type === "string"
+          ? parentObject.media_type
+          : undefined;
+      if (parentKey === "data" && imageMime && value.length > 256) {
         if (this.noImages) {
           return {
             value: "[IMAGE_REMOVED]",
@@ -33,7 +41,7 @@ export class Redactor {
               jsonPath,
               replacement: "[IMAGE_REMOVED]",
               count: 1,
-              detail: parentObject.mimeType,
+              detail: imageMime,
             }],
           };
         }
@@ -45,7 +53,7 @@ export class Redactor {
             jsonPath,
             replacement: "[PRESERVED_IMAGE]",
             count: 1,
-            detail: parentObject.mimeType,
+            detail: imageMime,
             manual_review: true,
           }],
         };

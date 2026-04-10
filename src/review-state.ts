@@ -33,7 +33,6 @@ export function computeDenyHash(patterns: RegExp[]): string {
 export function computeReviewKey(
   redactedHash: string,
   contextHashes: Record<string, string>,
-  provider?: string,
   model?: string,
   thinking?: string,
   denyHash?: string,
@@ -41,7 +40,6 @@ export function computeReviewKey(
   return sha256Text(JSON.stringify({
     redactedHash,
     contextHashes,
-    provider,
     model,
     thinking,
     denyHash,

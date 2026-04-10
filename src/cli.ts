@@ -1,20 +1,23 @@
 import os from "node:os";
 import path from "node:path";
-import type { CollectOptions, GrepOptions, InitOptions, ListOptions, RejectOptions, ReviewOptions, UploadOptions } from "./types.ts";
+import type { ApproveOptions, CollectOptions, GrepOptions, InitOptions, ListOptions, RejectOptions, ReviewOptions, UploadOptions } from "./types.ts";
 import { loadDenyPatterns } from "./review.ts";
 
 export function printUsage(): void {
   console.log(`
-pi-share-hf
+cc-share-hf
+
+Publish Claude Code session logs from one OSS project to a Hugging Face dataset.
 
 Usage:
-  pi-share-hf init --cwd <dir> --repo <hf-dataset-repo> --workspace <dir> [options]
-  pi-share-hf collect [--workspace <dir>] [options] [context-file...]
-  pi-share-hf review [--workspace <dir>] [options] [context-file...]
-  pi-share-hf upload [--workspace <dir>]
-  pi-share-hf reject [--workspace <dir>] <image-or-session>
-  pi-share-hf list [--workspace <dir>] --uploadable
-  pi-share-hf grep [--workspace <dir>] [--ignore-case] <pattern>
+  cc-share-hf init --cwd <dir> --repo <hf-dataset-repo> --workspace <dir> [options]
+  cc-share-hf collect [--workspace <dir>] [options] [context-file...]
+  cc-share-hf review [--workspace <dir>] [options] [context-file...]
+  cc-share-hf upload [--workspace <dir>]
+  cc-share-hf reject [--workspace <dir>] <image-or-session>
+  cc-share-hf approve [--workspace <dir>] <session>
+  cc-share-hf list [--workspace <dir>] --uploadable
+  cc-share-hf grep [--workspace <dir>] [--ignore-case] <pattern>
 
 Commands:
   init      Create a workspace and store cwd/repo configuration
@@ -22,53 +25,56 @@ Commands:
   review    Rerun LLM review only on existing redacted sessions
   upload    Upload approved redacted sessions and update manifest.jsonl in the dataset repo
   reject    Add a session to workspace/reject.txt so upload always skips it
+  approve   Manually approve a session, bypassing LLM review (adds to workspace/approve.txt)
   list      List sessions matching built-in filters
   grep      Ripgrep only the uploadable session set
 
 Init options:
-  --cwd <dir>            Working directory whose pi sessions should be collected (default: .)
+  --cwd <dir>            Working directory whose Claude Code sessions should be collected (default: .)
   --repo <repo>          Hugging Face dataset repo name or repo id
   --organization <name>  Optional HF organization or user namespace
-  --workspace <dir>      Workspace directory (default: .pi/hf-sessions)
+  --workspace <dir>      Workspace directory (default: .claude/hf-sessions)
   --no-images            Strip embedded images from redacted output
 
 Collect options:
-  --workspace <dir>      Existing workspace (default: .pi/hf-sessions)
+  --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
   --env-file <path>      Secret source file (default: ~/.zshrc)
   --secret <file>|<text> Additional literal secret or line-based secret file (repeatable)
   --force                Reprocess all sessions even if source_hash matches remote manifest
-  --provider <name>      pi provider override for review
-  --model <id>           pi model override for review
-  --thinking <level>     Thinking level override (off, minimal, low, medium, high, xhigh)
+  --model <id>           Claude model for LLM review (default: claude-sonnet-4-6)
+  --thinking <level>     Thinking budget: off, minimal, low, medium, high, xhigh (default: off)
   --parallel <n>         Number of parallel LLM reviews (default: 1)
   --deny <file>|<regex>  Deny pattern: file with one regex per line, or a regex string (repeatable)
   --session <file>       Process a single session file (for testing)
-  [context-file...]      Project context files for the LLM review (default: README.md, AGENTS.md if present)
+  [context-file...]      Project context files for the LLM review (default: README.md, CLAUDE.md, AGENTS.md if present; falls back to ~/.claude/CLAUDE.md)
 
 Review options:
-  --workspace <dir>      Existing workspace (default: .pi/hf-sessions)
-  --provider <name>      pi provider override for review
-  --model <id>           pi model override for review
-  --thinking <level>     Thinking level override (off, minimal, low, medium, high, xhigh)
+  --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
+  --model <id>           Claude model for LLM review (default: claude-sonnet-4-6)
+  --thinking <level>     Thinking budget: off, minimal, low, medium, high, xhigh (default: off)
   --parallel <n>         Number of parallel LLM reviews (default: 1)
   --deny <file>|<regex>  Deny pattern: file with one regex per line, or a regex string (repeatable)
   --session <file>       Review a single session file (for testing)
-  [context-file...]      Project context files for the LLM review (default: README.md, AGENTS.md if present)
+  [context-file...]      Project context files for the LLM review (default: README.md, CLAUDE.md, AGENTS.md if present; falls back to ~/.claude/CLAUDE.md)
 
 Upload options:
-  --workspace <dir>      Existing workspace (default: .pi/hf-sessions)
+  --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
   --dry-run              Show upload stats without uploading
 
 Reject options:
-  --workspace <dir>      Existing workspace (default: .pi/hf-sessions)
+  --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
   <image-or-session>     Extracted image filename or session filename to reject
 
+Approve options:
+  --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
+  <session>              Session filename to approve (overrides LLM review verdict)
+
 List options:
-  --workspace <dir>      Existing workspace (default: .pi/hf-sessions)
+  --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
   --uploadable           List only sessions that would be uploaded
 
 Grep options:
-  --workspace <dir>      Existing workspace (default: .pi/hf-sessions)
+  --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
   --ignore-case, -i      Case-insensitive search
   <pattern>              Ripgrep pattern to run against uploadable sessions
 `);
@@ -78,7 +84,7 @@ export function parseInitArgs(args: string[]): InitOptions {
   let cwd = path.resolve(".");
   let repo = "";
   let organization: string | undefined;
-  let workspace = path.resolve(".pi/hf-sessions");
+  let workspace = path.resolve(".claude/hf-sessions");
   let noImages = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -104,11 +110,10 @@ export function parseInitArgs(args: string[]): InitOptions {
 }
 
 export function parseCollectArgs(args: string[]): CollectOptions {
-  let workspace = path.resolve(".pi/hf-sessions");
+  let workspace = path.resolve(".claude/hf-sessions");
   let envFile = path.join(os.homedir(), ".zshrc");
   const secrets: string[] = [];
   let force = false;
-  let provider: string | undefined;
   let model: string | undefined;
   let thinking: string | undefined;
   let parallel = 1;
@@ -122,7 +127,6 @@ export function parseCollectArgs(args: string[]): CollectOptions {
     else if (arg === "--env-file") envFile = path.resolve(requireValue(args, ++i, "--env-file"));
     else if (arg === "--secret") secrets.push(requireValue(args, ++i, "--secret"));
     else if (arg === "--force") force = true;
-    else if (arg === "--provider") provider = requireValue(args, ++i, "--provider");
     else if (arg === "--model") model = requireValue(args, ++i, "--model");
     else if (arg === "--thinking") thinking = requireValue(args, ++i, "--thinking");
     else if (arg === "--parallel") parallel = parseInt(requireValue(args, ++i, "--parallel"), 10);
@@ -136,12 +140,11 @@ export function parseCollectArgs(args: string[]): CollectOptions {
   }
   if (parallel < 1 || !Number.isFinite(parallel)) parallel = 1;
 
-  return { workspace, envFile, secrets, force, contextFiles, provider, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session };
+  return { workspace, envFile, secrets, force, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session };
 }
 
 export function parseReviewArgs(args: string[]): ReviewOptions {
-  let workspace = path.resolve(".pi/hf-sessions");
-  let provider: string | undefined;
+  let workspace = path.resolve(".claude/hf-sessions");
   let model: string | undefined;
   let thinking: string | undefined;
   let parallel = 1;
@@ -152,7 +155,6 @@ export function parseReviewArgs(args: string[]): ReviewOptions {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--workspace") workspace = path.resolve(requireValue(args, ++i, "--workspace"));
-    else if (arg === "--provider") provider = requireValue(args, ++i, "--provider");
     else if (arg === "--model") model = requireValue(args, ++i, "--model");
     else if (arg === "--thinking") thinking = requireValue(args, ++i, "--thinking");
     else if (arg === "--parallel") parallel = parseInt(requireValue(args, ++i, "--parallel"), 10);
@@ -167,11 +169,11 @@ export function parseReviewArgs(args: string[]): ReviewOptions {
 
   if (parallel < 1 || !Number.isFinite(parallel)) parallel = 1;
 
-  return { workspace, contextFiles, provider, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session };
+  return { workspace, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session };
 }
 
 export function parseUploadArgs(args: string[]): UploadOptions {
-  let workspace = path.resolve(".pi/hf-sessions");
+  let workspace = path.resolve(".claude/hf-sessions");
   let dryRun = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -189,7 +191,7 @@ export function parseUploadArgs(args: string[]): UploadOptions {
 }
 
 export function parseRejectArgs(args: string[]): RejectOptions {
-  let workspace = path.resolve(".pi/hf-sessions");
+  let workspace = path.resolve(".claude/hf-sessions");
   let target = "";
 
   for (let i = 0; i < args.length; i++) {
@@ -206,8 +208,26 @@ export function parseRejectArgs(args: string[]): RejectOptions {
   return { workspace, target };
 }
 
+export function parseApproveArgs(args: string[]): ApproveOptions {
+  let workspace = path.resolve(".claude/hf-sessions");
+  let target = "";
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--workspace") workspace = path.resolve(requireValue(args, ++i, "--workspace"));
+    else if (!target) target = arg;
+    else throw new Error(`Unknown approve option: ${arg}`);
+  }
+
+  if (!target) {
+    throw new Error("approve requires a target filename");
+  }
+
+  return { workspace, target };
+}
+
 export function parseListArgs(args: string[]): ListOptions {
-  let workspace = path.resolve(".pi/hf-sessions");
+  let workspace = path.resolve(".claude/hf-sessions");
   let uploadable = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -221,7 +241,7 @@ export function parseListArgs(args: string[]): ListOptions {
 }
 
 export function parseGrepArgs(args: string[]): GrepOptions {
-  let workspace = path.resolve(".pi/hf-sessions");
+  let workspace = path.resolve(".claude/hf-sessions");
   let pattern = "";
   let ignoreCase = false;
 

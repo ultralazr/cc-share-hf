@@ -1,16 +1,22 @@
 import { spawn } from "node:child_process";
 import { readHfAccessToken } from "./hf.ts";
 
-export async function runCommand(command: string, args: string[], cwd?: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+export async function runCommand(command: string, args: string[], cwd?: string, stdin?: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdin !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       env: process.env,
+      shell: process.platform === "win32",
     });
 
     let stdout = "";
     let stderr = "";
+
+    if (stdin !== undefined && child.stdin) {
+      child.stdin.write(stdin);
+      child.stdin.end();
+    }
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdout += String(chunk);
@@ -68,11 +74,11 @@ export async function ensureStartupTools(command: string): Promise<void> {
   }
 
   if (command === "collect" || command === "review") {
-    if (!(await commandExists("pi"))) {
+    if (!(await commandExists("claude"))) {
       missing.push([
-        "Missing required command: pi",
+        "Missing required command: claude",
         "Install it with:",
-        "  npm install -g @mariozechner/pi-coding-agent",
+        "  npm install -g @anthropic-ai/claude-code",
       ].join("\n"));
     }
   }

@@ -1,8 +1,9 @@
 #!/usr/bin/env node --experimental-strip-types --no-warnings=ExperimentalWarning
 
-import { parseCollectArgs, parseGrepArgs, parseInitArgs, parseListArgs, parseRejectArgs, parseReviewArgs, parseUploadArgs, printUsage } from "./cli.ts";
+import { parseApproveArgs, parseCollectArgs, parseGrepArgs, parseInitArgs, parseListArgs, parseRejectArgs, parseReviewArgs, parseUploadArgs, printUsage } from "./cli.ts";
 import { runCollect, runInit } from "./collect.ts";
 import { ensureStartupTools } from "./process.ts";
+import { runApprove } from "./approve.ts";
 import { runReject } from "./reject.ts";
 import { runReview } from "./review.ts";
 import { runUpload } from "./upload.ts";
@@ -41,6 +42,11 @@ async function main(): Promise<void> {
 
   if (command === "reject") {
     await runReject(parseRejectArgs(args.slice(1)));
+    return;
+  }
+
+  if (command === "approve") {
+    await runApprove(parseApproveArgs(args.slice(1)));
     return;
   }
 

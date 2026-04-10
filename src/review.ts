@@ -13,11 +13,13 @@ import type {
   SessionReviewFile,
   Shareable,
 } from "./types.ts";
-import { runCommand } from "./process.ts";
 import { extractImagesFromSession, splitIntoReviewChunks } from "./review-serialize.ts";
 import { computeDenyHash, computeReviewKey, hashContextFiles, loadReviewFile } from "./review-state.ts";
 import { blockingTruffleHogReason, loadTruffleHogReport, trufflehogReportPath } from "./trufflehog.ts";
 import { isRecord, readWorkspaceConfig, resetReviewDir, sha256File, workspacePath } from "./workspace.ts";
+import { runCommand } from "./process.ts";
+
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 export async function runReview(options: ReviewOptions): Promise<void> {
   const config = readWorkspaceConfig(options.workspace);
@@ -25,7 +27,9 @@ export async function runReview(options: ReviewOptions): Promise<void> {
 
   const contextFiles = resolveContextFiles(config.cwd, options.contextFiles);
   if (contextFiles.length === 0) {
-    throw new Error("No context files found. Pass README.md/AGENTS.md explicitly or add them to the project root.");
+    throw new Error(
+      "No context files found. Pass a file explicitly, add README.md/CLAUDE.md/AGENTS.md to the project root, or create ~/.claude/CLAUDE.md as a global fallback.",
+    );
   }
   for (const file of contextFiles) {
     if (!fs.existsSync(file)) throw new Error(`Context file not found: ${file}`);
@@ -48,7 +52,7 @@ export async function runReview(options: ReviewOptions): Promise<void> {
   }
 
   const hasImages = !config.noImages;
-  const resolved = resolvePiDefaults(options.provider, options.model, options.thinking);
+  const resolved = resolveClaudeDefaults(options.model, options.thinking);
 
   let reviewed = 0;
   let skipped = 0;
@@ -72,14 +76,14 @@ export async function runReview(options: ReviewOptions): Promise<void> {
     const reportPath = workspacePath(options.workspace, "reports", `${file}.report.jsonl`);
     const trufflehogPath = trufflehogReportPath(options.workspace, file);
     const redactedHash = await sha256File(redactedPath);
-    const reviewKey = computeReviewKey(redactedHash, contextHashes, options.provider, options.model, options.thinking, denyHash);
+    const reviewKey = computeReviewKey(redactedHash, contextHashes, options.model, options.thinking, denyHash);
     const existingReview = loadReviewFile(reviewPath);
 
     const deterministicBlock = getDeterministicBlockReason(reportPath);
     if (deterministicBlock) {
       const denyReview = createDenyReview(
         file, contextFiles, contextHashes, redactedHash, reviewKey,
-        options.provider, options.model, deterministicBlock.reason,
+        options.model, deterministicBlock.reason,
         deterministicBlock.evidence,
         deterministicBlock.missedSensitiveData,
       );
@@ -101,7 +105,6 @@ export async function runReview(options: ReviewOptions): Promise<void> {
         contextHashes,
         redactedHash,
         reviewKey,
-        options.provider,
         options.model,
         trufflehogBlock.reason,
         trufflehogBlock.evidence,
@@ -117,7 +120,7 @@ export async function runReview(options: ReviewOptions): Promise<void> {
       if (matchedPattern) {
         const denyReview = createDenyReview(
           file, contextFiles, contextHashes, redactedHash, reviewKey,
-          options.provider, options.model, "deny-pattern", matchedPattern.source,
+          options.model, "deny-pattern", matchedPattern.source,
           "no",
         );
         fs.writeFileSync(reviewPath, `${JSON.stringify(denyReview, null, 2)}\n`);
@@ -143,13 +146,12 @@ export async function runReview(options: ReviewOptions): Promise<void> {
 
   console.log();
   console.log(bold("LLM review"));
-  console.log(`  ${bold("Provider:")} ${resolved.provider}`);
   console.log(`  ${bold("Model:")} ${resolved.model}`);
   console.log(`  ${bold("Thinking:")} ${resolved.thinking}`);
   console.log(`  ${bold("Parallel:")} ${options.parallel}`);
   console.log(`  ${bold("Context files:")} ${contextFiles.length}`);
-  console.log(`  ${bold("Reviewed sessions:")} ${skipped}`);
-  console.log(`  ${bold("Unreviewed sessions:")} ${cyan(String(workItems.length))}`);
+  console.log(`  ${bold("Already reviewed:")} ${skipped}`);
+  console.log(`  ${bold("To review:")} ${cyan(String(workItems.length))}`);
 
   const confirmed = await confirmPrompt("\nContinue with LLM review? (y/n) ");
   if (!confirmed) {
@@ -176,13 +178,11 @@ export async function runReview(options: ReviewOptions): Promise<void> {
         const chunkFile = chunkFiles[i];
         const chunkText = fs.readFileSync(chunkFile, "utf-8");
         try {
-          const result = await reviewChunkWithPi(
-            config.cwd,
+          const result = await reviewChunkWithClaude(
             contextFiles,
             chunkFile,
             i + 1,
             chunkFiles.length,
-            options.provider,
             options.model,
             options.thinking,
             imageFiles,
@@ -210,7 +210,6 @@ export async function runReview(options: ReviewOptions): Promise<void> {
       file: item.file,
       context_files: contextFiles,
       context_hashes: contextHashes,
-      provider: options.provider,
       model: options.model,
       redacted_hash: item.redactedHash,
       review_key: item.reviewKey,
@@ -284,7 +283,7 @@ export async function runReview(options: ReviewOptions): Promise<void> {
       console.log();
       console.log(bold("Manual follow-up"));
       console.log(`  ${bold("Extracted images:")} ${cyan(String(imageCount))} -> ${imagesDir}`);
-      console.log(`  ${bold("Reject by image:")} pi-share-hf reject <image-path>`);
+      console.log(`  ${bold("Reject by image:")} cc-share-hf reject <image-path>`);
       console.log(dim("  Rejecting an image rejects the entire session that contains it."));
     }
   }
@@ -294,7 +293,7 @@ export async function runReview(options: ReviewOptions): Promise<void> {
   console.log();
   console.log(bold("Next step"));
   if (summary.uploadable > 0) {
-    console.log(`  ${green("Run:")} pi-share-hf upload`);
+    console.log(`  ${green("Run:")} cc-share-hf upload`);
   } else {
     console.log(`  ${yellow("No uploadable sessions.")}`);
   }
@@ -407,29 +406,10 @@ function summarizeReviews(workspace: string, sessionFiles: string[]): {
   };
 }
 
-function resolvePiDefaults(provider?: string, model?: string, thinking?: string): { provider: string; model: string; thinking: string } {
-  let resolvedProvider = provider ?? "";
-  let resolvedModel = model ?? "";
-  let resolvedThinking = thinking ?? "";
-
-  if (!resolvedProvider || !resolvedModel || !resolvedThinking) {
-    const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
-    if (fs.existsSync(settingsPath)) {
-      try {
-        const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
-        if (!resolvedProvider && typeof settings.defaultProvider === "string") resolvedProvider = settings.defaultProvider;
-        if (!resolvedModel && typeof settings.defaultModel === "string") resolvedModel = settings.defaultModel;
-        if (!resolvedThinking && typeof settings.defaultThinkingLevel === "string") resolvedThinking = settings.defaultThinkingLevel;
-      } catch {
-        // Ignore parse errors in settings.
-      }
-    }
-  }
-
+function resolveClaudeDefaults(model?: string, thinking?: string): { model: string; thinking: string } {
   return {
-    provider: resolvedProvider || "(pi default)",
-    model: resolvedModel || "(pi default)",
-    thinking: resolvedThinking || "(pi default)",
+    model: model || DEFAULT_MODEL,
+    thinking: thinking || "off",
   };
 }
 
@@ -465,70 +445,93 @@ function resolveContextFiles(cwd: string, files: string[]): string[] {
     return files.map((file) => resolveContextFile(cwd, file));
   }
 
-  const defaults = ["README.md", "AGENTS.md"]
+  // Project-level context files take priority.
+  const projectFiles = ["README.md", "CLAUDE.md", "AGENTS.md"]
     .map((file) => path.resolve(cwd, file))
     .filter((file) => fs.existsSync(file));
 
-  return defaults;
+  if (projectFiles.length > 0) return projectFiles;
+
+  // Fall back to the global CLAUDE.md (~/.claude/CLAUDE.md) if no project-level files found.
+  const globalClaudeMd = path.join(os.homedir(), ".claude", "CLAUDE.md");
+  if (fs.existsSync(globalClaudeMd)) return [globalClaudeMd];
+
+  return [];
 }
 
 function resolveContextFile(cwd: string, file: string): string {
   return path.isAbsolute(file) ? file : path.resolve(cwd, file);
 }
 
-async function reviewChunkWithPi(
-  cwd: string,
+async function reviewChunkWithClaude(
   contextFiles: string[],
   chunkFile: string,
   chunkIndex: number,
   chunkCount: number,
-  provider?: string,
   model?: string,
   thinking?: string,
   imageFiles?: string[],
 ): Promise<ChunkReviewResult> {
-  const hasSessionImages = imageFiles !== undefined && imageFiles.length > 0;
-  const prompt = createReviewPrompt(chunkIndex, chunkCount, hasSessionImages);
+  const resolvedModel = model || DEFAULT_MODEL;
+  const hasSessionImages = (imageFiles?.length ?? 0) > 0;
+  const reviewPrompt = createReviewPrompt(chunkIndex, chunkCount, hasSessionImages);
+
+  // Build a single prompt string: context files + chunk + instructions.
+  const parts: string[] = [];
+  for (const file of contextFiles) {
+    parts.push(`<context file="${path.basename(file)}">\n${fs.readFileSync(file, "utf-8")}\n</context>`);
+  }
+  parts.push(`<session_chunk>\n${fs.readFileSync(chunkFile, "utf-8")}\n</session_chunk>`);
+  parts.push(reviewPrompt);
+  const fullPrompt = parts.join("\n\n");
+
+  // Use --system-prompt to replace the default system prompt entirely.
+  // This prevents the global CLAUDE.md from being auto-loaded, which would
+  // interfere with the review task when its content appears in the user message.
+  const systemPrompt = "You are a strict JSON-only responder. You review redacted coding agent session transcripts for public dataset sharing. You output only valid JSON matching the schema provided in the user message — no prose, no markdown fences, just the JSON object.";
+
   const args = [
-    "--no-session",
-    "--no-extensions",
-    "--no-skills",
-    "--no-prompt-templates",
-    "--no-themes",
-    "--no-tools",
+    "--no-session-persistence",
+    "--tools", "",
+    "--model", resolvedModel,
+    "--system-prompt", systemPrompt,
+    "-p",
   ];
+  if (thinking && thinking !== "off") args.push("--effort", thinkingToEffort(thinking));
 
-  if (provider) args.push("--provider", provider);
-  if (model) args.push("--model", model);
-  if (thinking) args.push("--thinking", thinking);
-
-  for (const file of contextFiles) args.push(`@${file}`);
-  args.push(`@${chunkFile}`);
-  if (hasSessionImages && chunkIndex === 1) {
-    for (const img of imageFiles) args.push(`@${img}`);
-  }
-  args.push("-p", prompt);
-
-  const result = await runCommand("pi", args, cwd);
+  // Pass the prompt via stdin to avoid Windows cmd.exe argument length limits (~32k chars).
+  const result = await runCommand("claude", args, undefined, fullPrompt);
   if (!result.ok) {
-    throw new Error(`pi review failed: ${result.stderr || result.stdout || "unknown error"}`);
+    throw new Error(`claude review failed: ${result.stderr || result.stdout || "unknown error"}`);
   }
+
   const parsed = parseChunkReviewResult(result.stdout);
   if (!parsed) {
-    throw new Error(`Could not parse JSON review result from pi output:\n${result.stdout}`);
+    throw new Error(`Could not parse JSON review result from claude output:\n${result.stdout}`);
   }
   return parsed;
 }
 
+function thinkingToEffort(thinking: string): string {
+  const map: Record<string, string> = {
+    minimal: "low",
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "max",
+  };
+  return map[thinking] ?? "medium";
+}
+
 function createReviewPrompt(chunkIndex: number, chunkCount: number, hasImages: boolean): string {
   return [
-    "Review a redacted pi session chunk for public OSS dataset sharing.",
+    "Review a redacted Claude Code session chunk for public OSS dataset sharing.",
     "",
     hasImages
-      ? "The attached files include project context files, the session chunk, and images extracted from the session. Review the images for sensitive content (screenshots of private data, credentials, personal information, non-project content)."
-      : "The attached files include project context files followed by the session chunk as the last file.",
+      ? "The attached content includes project context files, the session chunk, and images extracted from the session. Review the images for sensitive content (screenshots of private data, credentials, personal information, non-project content)."
+      : "The attached content includes project context files followed by the session chunk.",
     "Judge whether the session chunk is about the OSS project, whether it is fit to share publicly on Hugging Face, and whether there appears to be missed sensitive data after deterministic redaction.",
-    "The session chunk is a serialized plain-text transcript derived from a redacted session file. It may contain user messages, assistant text, thinking blocks, tool calls, tool results, bash output, custom entries, branch summaries, compaction summaries, preserved image markers, and verbatim JSON for details/custom data.",
+    "The session chunk is a plain-text transcript derived from a redacted Claude Code session file. It may contain user messages, assistant text, thinking blocks, tool calls (Bash, Read, Edit, Glob, Grep, Write, WebFetch, Agent, etc.), and tool results.",
     "",
     `This is chunk ${chunkIndex} of ${chunkCount}.`,
     "",
@@ -701,7 +704,6 @@ function createDenyReview(
   contextHashes: Record<string, string>,
   redactedHash: string,
   reviewKey: string,
-  provider: string | undefined,
   model: string | undefined,
   reason: string,
   evidence: string,
@@ -711,7 +713,6 @@ function createDenyReview(
     file,
     context_files: contextFiles,
     context_hashes: contextHashes,
-    provider,
     model,
     redacted_hash: redactedHash,
     review_key: reviewKey,

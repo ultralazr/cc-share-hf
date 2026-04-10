@@ -8,7 +8,10 @@ import { downloadDatasetTextFile } from "./hf.ts";
 export { LOCAL_MANIFEST_FILE, REMOTE_MANIFEST_CACHE_FILE, REMOTE_MANIFEST_FILE, WORKSPACE_CONFIG_FILE };
 
 export function cwdToSessionDirName(cwd: string): string {
-  return `--${cwd.replace(/\//g, "-").slice(1)}--`;
+  // Claude Code names project dirs by replacing path separators and colons with dashes.
+  // e.g., C:\DATA\projects\foo -> C--DATA-projects-foo
+  //       /home/user/foo -> -home-user-foo
+  return cwd.replace(/[:\\/]/g, "-");
 }
 
 export function workspacePath(workspace: string, ...segments: string[]): string {

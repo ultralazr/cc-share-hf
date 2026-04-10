@@ -14,6 +14,9 @@ export async function splitIntoReviewChunks(sessionFile: string, chunkDir: strin
   let chunkIndex = 1;
   let current = "";
 
+  // Maps tool_use_id -> tool_name across entries so tool_result blocks can show the tool name.
+  const toolNameMap = new Map<string, string>();
+
   const input = fs.createReadStream(sessionFile, { encoding: "utf-8" });
   const reader = readline.createInterface({ input, crlfDelay: Infinity });
 
@@ -28,7 +31,7 @@ export async function splitIntoReviewChunks(sessionFile: string, chunkDir: strin
     }
     if (!isRecord(parsed)) continue;
 
-    const blocks = serializeEntryForReview(parsed as JsonObject);
+    const blocks = serializeEntryForReview(parsed as JsonObject, toolNameMap);
     for (const block of blocks) {
       if (!block) continue;
       const next = `${block}\n\n`;
@@ -110,61 +113,46 @@ export function extractImagesFromSession(sessionPath: string, imagesDir: string,
   return extracted;
 }
 
-export function serializeEntryForReview(entry: JsonObject): string[] {
+/**
+ * Serialize a single Claude Code JSONL entry into human-readable review blocks.
+ * toolNameMap is maintained across calls so tool_result blocks can show the tool name.
+ */
+export function serializeEntryForReview(entry: JsonObject, toolNameMap?: Map<string, string>): string[] {
   const parts: string[] = [];
 
-  if (entry.type === "session") {
-    if (typeof entry.cwd === "string") parts.push(`[Session cwd]: ${entry.cwd}`);
-    if (typeof entry.parentSession === "string") parts.push(`[Parent session]: ${entry.parentSession}`);
+  // Infrastructure / metadata entries — skip or emit minimal label.
+  if (
+    entry.type === "permission-mode"
+    || entry.type === "file-history-snapshot"
+    || entry.type === "attachment"
+    || entry.type === "last-prompt"
+    || entry.type === "agent-name"
+  ) {
     return parts;
   }
 
-  if (entry.type === "session_info") {
-    if (typeof entry.name === "string") parts.push(`[Session info]: ${entry.name}`);
+  // System events (hook summaries, local commands, etc.) — skip.
+  if (entry.type === "system") {
     return parts;
   }
 
-  if (entry.type === "branch_summary" && typeof entry.summary === "string") {
-    parts.push(`[Branch summary]: ${entry.summary}`);
-    if (entry.details !== undefined) parts.push(`[Branch summary details]: ${truncateForReview(stringifyJson(entry.details), REVIEW_JSON_VALUE_MAX_CHARS)}`);
+  // Session title set by the user.
+  if (entry.type === "custom-title" && typeof entry.customTitle === "string") {
+    parts.push(`[Session title]: ${entry.customTitle}`);
     return parts;
   }
 
-  if (entry.type === "compaction" && typeof entry.summary === "string") {
-    parts.push(`[Compaction summary]: ${entry.summary}`);
-    if (entry.details !== undefined) parts.push(`[Compaction details]: ${truncateForReview(stringifyJson(entry.details), REVIEW_JSON_VALUE_MAX_CHARS)}`);
+  // User turn.
+  if (entry.type === "user" && isRecord(entry.message)) {
+    const message = entry.message as JsonObject;
+    const content = message.content as JsonValue | undefined;
+    serializeUserContent(content, toolNameMap, parts);
     return parts;
   }
 
-  if (entry.type === "custom") {
-    if (typeof entry.customType === "string") {
-      parts.push(`[Custom entry:${entry.customType}]: ${truncateForReview(stringifyJson(entry.data), REVIEW_JSON_VALUE_MAX_CHARS)}`);
-    } else {
-      parts.push(`[Custom entry]: ${truncateForReview(stringifyJson(entry.data), REVIEW_JSON_VALUE_MAX_CHARS)}`);
-    }
-    return parts;
-  }
-
-  if (entry.type === "custom_message") {
-    const prefix = typeof entry.customType === "string" ? `[Custom message:${entry.customType}]` : `[Custom message]`;
-    const content = serializeContentLikeUser(entry.content as JsonValue | undefined);
-    if (content) parts.push(`${prefix}: ${content}`);
-    if (entry.details !== undefined) parts.push(`${prefix} details: ${truncateForReview(stringifyJson(entry.details), REVIEW_JSON_VALUE_MAX_CHARS)}`);
-    return parts;
-  }
-
-  if (entry.type !== "message" || !isRecord(entry.message)) return parts;
-  const message = entry.message as JsonObject;
-  const role = typeof message.role === "string" ? message.role : undefined;
-  if (!role) return parts;
-
-  if (role === "user") {
-    const content = serializeContentLikeUser(message.content as JsonValue | undefined);
-    if (content) parts.push(`[User]: ${content}`);
-    return parts;
-  }
-
-  if (role === "assistant") {
+  // Assistant turn.
+  if (entry.type === "assistant" && isRecord(entry.message)) {
+    const message = entry.message as JsonObject;
     const content = Array.isArray(message.content) ? message.content : [];
     const textParts: string[] = [];
     const thinkingParts: string[] = [];
@@ -172,20 +160,24 @@ export function serializeEntryForReview(entry: JsonObject): string[] {
 
     for (const block of content) {
       if (!isRecord(block) || typeof block.type !== "string") continue;
+
       if (block.type === "text" && typeof block.text === "string") {
         textParts.push(block.text);
       } else if (block.type === "thinking" && typeof block.thinking === "string") {
-        thinkingParts.push(block.thinking);
-      } else if (block.type === "toolCall") {
+        // Skip empty thinking blocks (redacted / signature-only).
+        if (block.thinking.trim().length > 0) {
+          thinkingParts.push(block.thinking);
+        }
+      } else if (block.type === "tool_use") {
         const name = typeof block.name === "string" ? block.name : "tool";
-        const args = isRecord(block.arguments) ? block.arguments : {};
-        const argsText = Object.entries(args)
-          .map(([key, value]) => `${key}=${stringifyJson(value as JsonValue)}`)
+        const id = typeof block.id === "string" ? block.id : undefined;
+        // Register tool name so we can look it up when the result comes back.
+        if (id && toolNameMap) toolNameMap.set(id, name);
+        const input = isRecord(block.input) ? block.input : {};
+        const argsText = Object.entries(input)
+          .map(([key, value]) => `${key}=${truncateForReview(stringifyJson(value as JsonValue), REVIEW_JSON_VALUE_MAX_CHARS)}`)
           .join(", ");
-        const partialJson = typeof block.partialJson === "string"
-          ? ` raw=${truncateForReview(block.partialJson, REVIEW_JSON_VALUE_MAX_CHARS)}`
-          : "";
-        toolCalls.push(`${name}(${argsText})${partialJson}`);
+        toolCalls.push(`${name}(${argsText})`);
       }
     }
 
@@ -195,62 +187,57 @@ export function serializeEntryForReview(entry: JsonObject): string[] {
     return parts;
   }
 
-  if (role === "toolResult") {
-    const toolName = typeof message.toolName === "string" ? message.toolName : "tool";
-    const content = serializeToolResultContent(message.content as JsonValue | undefined);
-    if (content) parts.push(`[Tool result:${toolName}]: ${truncateForReview(content, REVIEW_TOOL_RESULT_MAX_CHARS)}`);
-    if (message.details !== undefined) {
-      parts.push(`[Tool result details:${toolName}]: ${truncateForReview(stringifyJson(message.details), REVIEW_JSON_VALUE_MAX_CHARS)}`);
-    }
-    return parts;
-  }
-
-  if (role === "bashExecution") {
-    if (typeof message.command === "string") parts.push(`[Bash command]: ${message.command}`);
-    if (typeof message.output === "string") parts.push(`[Bash output]: ${truncateForReview(message.output, REVIEW_TOOL_RESULT_MAX_CHARS)}`);
-    return parts;
-  }
-
-  if (role === "custom") {
-    const prefix = typeof message.customType === "string" ? `[Custom message:${message.customType}]` : `[Custom message]`;
-    const content = serializeContentLikeUser(message.content as JsonValue | undefined);
-    if (content) parts.push(`${prefix}: ${content}`);
-    if (message.details !== undefined) parts.push(`${prefix} details: ${truncateForReview(stringifyJson(message.details), REVIEW_JSON_VALUE_MAX_CHARS)}`);
-    return parts;
-  }
-
-  if (role === "branchSummary" && typeof message.summary === "string") {
-    parts.push(`[Branch summary]: ${message.summary}`);
-    return parts;
-  }
-
-  if (role === "compactionSummary" && typeof message.summary === "string") {
-    parts.push(`[Compaction summary]: ${message.summary}`);
-    return parts;
-  }
-
   return parts;
 }
 
-function serializeContentLikeUser(content: JsonValue | undefined): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
+/**
+ * Serialize the content field of a user message.
+ * Content can be a plain string or an array of content blocks.
+ * Tool result blocks are identified by tool_use_id and looked up in toolNameMap.
+ */
+function serializeUserContent(
+  content: JsonValue | undefined,
+  toolNameMap: Map<string, string> | undefined,
+  parts: string[],
+): void {
+  // Plain string message.
+  if (typeof content === "string") {
+    if (content.trim().length > 0) parts.push(`[User]: ${content}`);
+    return;
+  }
 
-  const parts: string[] = [];
+  if (!Array.isArray(content)) return;
+
+  const userTextParts: string[] = [];
+
   for (const block of content) {
     if (!isRecord(block) || typeof block.type !== "string") continue;
+
     if (block.type === "text" && typeof block.text === "string") {
-      parts.push(block.text);
+      userTextParts.push(block.text);
     } else if (block.type === "image") {
+      // Inline image in user message.
       const mimeType = typeof block.mimeType === "string" ? block.mimeType : "image";
-      parts.push(`[Image preserved: ${mimeType}]`);
+      userTextParts.push(`[Image: ${mimeType}]`);
+    } else if (block.type === "tool_result") {
+      // Tool result block — look up the tool name by tool_use_id.
+      const id = typeof block.tool_use_id === "string" ? block.tool_use_id : undefined;
+      const toolName = (id && toolNameMap?.get(id)) ?? (id ? id.slice(0, 12) : "tool");
+      const resultContent = serializeToolResultContent(block.content as JsonValue | undefined);
+      if (resultContent) {
+        parts.push(`[Tool result:${toolName}]: ${truncateForReview(resultContent, REVIEW_TOOL_RESULT_MAX_CHARS)}`);
+      }
     }
   }
-  return parts.join("\n");
+
+  if (userTextParts.length > 0) {
+    parts.push(`[User]: ${userTextParts.join("\n")}`);
+  }
 }
 
 function serializeToolResultContent(content: JsonValue | undefined): string {
-  if (!Array.isArray(content)) return typeof content === "string" ? content : "";
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
 
   const parts: string[] = [];
   for (const block of content) {
