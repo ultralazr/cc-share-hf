@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { downloadFile, uploadFiles } from "@huggingface/hub";
 import type { RepoDesignation } from "@huggingface/hub";
 
@@ -55,10 +54,14 @@ export async function downloadDatasetTextFile(repo: string, filePath: string): P
 }
 
 export async function uploadDatasetFolder(repo: string, localDir: string, commitTitle: string): Promise<void> {
+  const files = fs.readdirSync(localDir).map((name) => {
+    const absPath = path.join(localDir, name);
+    return { path: name, content: new Blob([fs.readFileSync(absPath)]) };
+  });
   await uploadFiles({
     repo: datasetRepo(repo),
     accessToken: requireHfAccessToken(),
-    files: [pathToFileURL(localDir)],
+    files,
     commitTitle,
   });
 }
