@@ -53,11 +53,25 @@ export async function downloadDatasetTextFile(repo: string, filePath: string): P
   }
 }
 
+function listFilesRecursive(dir: string, base: string): Array<{ path: string; absPath: string }> {
+  const result: Array<{ path: string; absPath: string }> = [];
+  for (const name of fs.readdirSync(dir)) {
+    const absPath = path.join(dir, name);
+    const relPath = base ? `${base}/${name}` : name;
+    if (fs.statSync(absPath).isDirectory()) {
+      result.push(...listFilesRecursive(absPath, relPath));
+    } else {
+      result.push({ path: relPath, absPath });
+    }
+  }
+  return result;
+}
+
 export async function uploadDatasetFolder(repo: string, localDir: string, commitTitle: string): Promise<void> {
-  const files = fs.readdirSync(localDir).map((name) => {
-    const absPath = path.join(localDir, name);
-    return { path: name, content: new Blob([fs.readFileSync(absPath)]) };
-  });
+  const files = listFilesRecursive(localDir, "").map(({ path: relPath, absPath }) => ({
+    path: relPath,
+    content: new Blob([fs.readFileSync(absPath)]),
+  }));
   await uploadFiles({
     repo: datasetRepo(repo),
     accessToken: requireHfAccessToken(),

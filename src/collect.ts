@@ -3,14 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
+import { attributionHash, buildAttribution } from "./attribution.ts";
 import { bold, cyan, dim, green, yellow } from "./colors.ts";
+import { computePiiConfigHash, discoverAndMergePii, loadRedactCsv, loadRedactPatternsCsv } from "./pii.ts";
 import { Redactor } from "./redactor.ts";
 import { runReview } from "./review.ts";
 import { computeSecretHash } from "./secrets.ts";
 import { formatTruffleHogFinding, saveTruffleHogReport, scanFilesWithTruffleHog, trufflehogReportPath } from "./trufflehog.ts";
-import type { CollectOptions, InitOptions, JsonObject, ReviewOptions } from "./types.ts";
+import type { CollectOptions, InitOptions, JsonObject, PiiPair, RegexPattern, ReviewOptions } from "./types.ts";
 import { LOCAL_MANIFEST_FILE, REDACTION_VERSION, REMOTE_MANIFEST_CACHE_FILE } from "./types.ts";
 import {
+  createExamplePiiCsvFiles,
   cwdToSessionDirName,
   downloadRemoteManifest,
   ensureWorkspaceDirs,
@@ -32,11 +35,14 @@ export async function runInit(options: InitOptions): Promise<void> {
     cwd: options.cwd,
     repo: options.repo,
     noImages: options.noImages,
+    visibility: options.visibility,
   });
+  createExamplePiiCsvFiles(options.workspace);
   console.log(`${bold("Initialized workspace:")} ${options.workspace}`);
   console.log(`${bold("CWD:")} ${options.cwd}`);
   console.log(`${bold("Repo:")} ${options.repo}`);
   console.log(`${bold("Images:")} ${options.noImages ? "stripped" : "preserved"}`);
+  console.log(`${bold("Visibility:")} ${options.visibility}`);
 }
 
 export async function runCollect(options: CollectOptions): Promise<void> {
@@ -52,7 +58,6 @@ export async function runCollect(options: CollectOptions): Promise<void> {
   if (options.session) {
     sessionFiles = sessionFiles.filter((file) => file.includes(options.session!));
   }
-  const redactor = new Redactor(options.envFile, options.secrets, !!config.noImages);
   const secretsHash = computeSecretHash(options.envFile, options.secrets);
   const localManifestPath = workspacePath(options.workspace, LOCAL_MANIFEST_FILE);
   const localManifest = loadLocalManifest(localManifestPath);
@@ -70,6 +75,63 @@ export async function runCollect(options: CollectOptions): Promise<void> {
   const processedTruffleHogFindings: Array<{ file: string; findings: string[] }> = [];
   const trufflehogScanQueue: Array<{ file: string; redactedPath: string; redactedHash: string }> = [];
 
+  // Attribution: deterministic, derived from workspace config (cwd, visibility).
+  // Built once per collect run; no LLM call. Hash feeds into redaction key so
+  // toggling --visibility re-processes affected sessions.
+  const visibility = config.visibility ?? "private";
+  const attribution = await buildAttribution(config);
+  const attrHash = attributionHash(attribution, visibility);
+  console.log(bold("Attribution"));
+  console.log(`  ${bold("Visibility:")} ${visibility}`);
+  console.log(`  ${bold("Pairs:")} ${attribution.pairs.length}`);
+  console.log(`  ${bold("Patterns:")} ${attribution.patterns.length}`);
+  console.log();
+
+  // Phase 1: PII discovery pre-pass (Haiku; cached per source_hash)
+  let piiPairs: PiiPair[] = [];
+  let regexPatterns: RegexPattern[] = [];
+  let piiConfigHash = "";
+
+  if (!options.noPiiScan) {
+    console.log(bold("PII Discovery"));
+    process.stdout.write(`  ${bold("Scanning sessions:")} 0/${sessionFiles.length}`);
+    let piiScanned = 0;
+    let totalNewFindings = 0;
+
+    const piiExcludeTerms: string[] = [];
+    if (options.keepProjectName) {
+      const projectName = path.basename(config.cwd);
+      piiExcludeTerms.push(projectName, projectName.replace(/\s+/g, "-"));
+    }
+
+    for (const file of sessionFiles) {
+      const inputPath = path.join(sessionDir, file);
+      const sourceHash = await sha256File(inputPath);
+      const result = await discoverAndMergePii(inputPath, sourceHash, options.workspace, piiExcludeTerms);
+      totalNewFindings += result.newFindings;
+      piiScanned++;
+      process.stdout.write(`\r  ${bold("Scanning sessions:")} ${piiScanned}/${sessionFiles.length}`);
+    }
+
+    console.log();
+    console.log(`  ${bold("New PII items found:")} ${totalNewFindings > 0 ? yellow(String(totalNewFindings)) : String(totalNewFindings)}`);
+    console.log();
+
+    piiPairs = loadRedactCsv(options.workspace);
+    regexPatterns = loadRedactPatternsCsv(options.workspace);
+    piiConfigHash = computePiiConfigHash(options.workspace);
+  }
+
+  const redactor = new Redactor(
+    options.envFile,
+    options.secrets,
+    !!config.noImages,
+    piiPairs,
+    regexPatterns,
+    attribution.pairs,
+    attribution.patterns,
+  );
+
   console.log(bold("Collect"));
   process.stdout.write(`  ${bold("Sessions found:")} 0`);
 
@@ -79,7 +141,7 @@ export async function runCollect(options: CollectOptions): Promise<void> {
 
     const inputPath = path.join(sessionDir, file);
     const sourceHash = await sha256File(inputPath);
-    const redactionKey = createRedactionKey(sourceHash, secretsHash, !!config.noImages);
+    const redactionKey = createRedactionKey(sourceHash, secretsHash, !!config.noImages, piiConfigHash, attrHash);
     const remoteEntry = remoteManifest.get(file);
     const localEntry = localManifest.get(file);
     const redactedPath = workspacePath(options.workspace, "redacted", file);
@@ -223,8 +285,10 @@ export async function runCollect(options: CollectOptions): Promise<void> {
   await runReview(reviewOptions);
 }
 
-function createRedactionKey(sourceHash: string, secretsHash: string, noImages: boolean): string {
-  return `v${REDACTION_VERSION}:${sourceHash}:${secretsHash}:${noImages ? "no-images" : "keep-images"}`;
+function createRedactionKey(sourceHash: string, secretsHash: string, noImages: boolean, piiConfigHash: string, attrHash: string): string {
+  const piiPart = piiConfigHash ? `:${piiConfigHash}` : "";
+  const attrPart = attrHash ? `:${attrHash}` : "";
+  return `v${REDACTION_VERSION}:${sourceHash}:${secretsHash}:${noImages ? "no-images" : "keep-images"}${piiPart}${attrPart}`;
 }
 
 function findSessionDir(cwd: string): string {

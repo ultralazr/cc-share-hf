@@ -98,7 +98,7 @@ export async function runUpload(options: UploadOptions): Promise<void> {
 
   const uploadDir = workspacePath(options.workspace, "_upload_staging");
   fs.rmSync(uploadDir, { recursive: true, force: true });
-  fs.mkdirSync(uploadDir, { recursive: true });
+  fs.mkdirSync(path.join(uploadDir, "data"), { recursive: true });
 
   const updatedManifest = new Map(remoteManifest);
   let staged = 0;
@@ -115,13 +115,7 @@ export async function runUpload(options: UploadOptions): Promise<void> {
     const localFile = workspacePath(options.workspace, "redacted", entry.file);
     if (!fs.existsSync(localFile)) continue;
 
-    const sessionId = entry.file.endsWith(".jsonl") ? entry.file.slice(0, -".jsonl".length) : entry.file;
-    const rawLines = fs.readFileSync(localFile, "utf-8").split("\n").filter((l) => l.trim() !== "");
-    const traces = rawLines.map((line) => {
-      try { return JSON.parse(line); } catch { return line; }
-    });
-    const row = JSON.stringify({ harness: "claude-code", session_id: sessionId, traces, file_name: entry.file });
-    fs.writeFileSync(path.join(uploadDir, entry.file), `${row}\n`);
+    fs.copyFileSync(localFile, path.join(uploadDir, "data", entry.file));
     updatedManifest.set(entry.file, {
       file: entry.file,
       source_hash: entry.source_hash,
@@ -173,6 +167,11 @@ async function generateDatasetCard(
     "- en",
     "- code",
     "license: other",
+    "configs:",
+    "- config_name: default",
+    "  data_files:",
+    "  - split: train",
+    "    path: data/*.jsonl",
     "---",
     "",
     `# Claude Code session traces for ${repo}`,
@@ -183,13 +182,13 @@ async function generateDatasetCard(
     "",
     "## Data description",
     "",
-    "Each row in the dataset corresponds to one Claude Code session and has four columns:",
+    "Each file in `data/` is a redacted Claude Code session in its native JSONL format (one entry per line). HuggingFace auto-converts these to Parquet with one row per session file and four columns:",
     "",
     "| Column | Type | Description |",
     "| --- | --- | --- |",
-    "| `harness` | string | Always `claude-code` — identifies the agent that produced the traces |",
+    "| `harness` | string | Agent identifier, e.g. `claude-code` |",
     "| `session_id` | string | UUID matching the session filename (without `.jsonl`) |",
-    "| `traces` | list | Array of parsed JSONL entries from the redacted session file |",
+    "| `traces` | list | Array of all JSONL entries from the session file |",
     "| `file_name` | string | Original session filename (e.g. `abc123.jsonl`) |",
     "",
     "Each entry in `traces` is a structured Claude Code session entry. Entry types include `user`, `assistant`, `system`, and `custom-title`. Assistant entries may contain `text`, `tool_use`, and `thinking` content blocks. User entries may contain plain text or `tool_result` blocks.",

@@ -2,15 +2,18 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type JsonObject = { [key: string]: JsonValue };
 
 export type Severity = "low" | "medium" | "high" | "critical";
-export type DetectorName = "literal-secret" | "image" | "parse-error";
+export type DetectorName = "literal-secret" | "image" | "parse-error" | "pii-find-replace" | "pii-regex" | "attribution-find-replace" | "attribution-regex";
 export type AboutProject = "yes" | "no" | "mixed";
 export type Shareable = "yes" | "no" | "manual_review";
 export type MissedSensitiveData = "yes" | "no" | "maybe";
+
+export type Visibility = "oss" | "private";
 
 export interface WorkspaceConfig {
   cwd: string;
   repo: string;
   noImages?: boolean;
+  visibility?: Visibility;
 }
 
 export interface InitOptions {
@@ -18,6 +21,19 @@ export interface InitOptions {
   repo: string;
   workspace: string;
   noImages: boolean;
+  visibility: Visibility;
+}
+
+export interface PiiPair {
+  find: string;
+  replace: string;
+  case_sensitive: boolean;
+}
+
+export interface RegexPattern {
+  pattern: string;
+  replace: string;
+  flags: string;
 }
 
 export interface CollectOptions {
@@ -31,6 +47,8 @@ export interface CollectOptions {
   parallel: number;
   denyPatterns: RegExp[];
   session?: string;
+  noPiiScan: boolean;
+  keepProjectName: boolean;
 }
 
 export interface ReviewOptions {

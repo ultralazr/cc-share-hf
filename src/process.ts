@@ -18,10 +18,10 @@ export async function runCommand(command: string, args: string[], cwd?: string, 
       child.stdin.end();
     }
 
-    child.stdout.on("data", (chunk: Buffer | string) => {
+    child.stdout!.on("data", (chunk: Buffer | string) => {
       stdout += String(chunk);
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
+    child.stderr!.on("data", (chunk: Buffer | string) => {
       stderr += String(chunk);
     });
     child.on("error", (error) => {

@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import type { ApproveOptions, CollectOptions, GrepOptions, InitOptions, ListOptions, RejectOptions, ReviewOptions, UploadOptions } from "./types.ts";
+import type { ApproveOptions, CollectOptions, GrepOptions, InitOptions, ListOptions, RejectOptions, ReviewOptions, UploadOptions, Visibility } from "./types.ts";
 import { loadDenyPatterns } from "./review.ts";
 
 export function printUsage(): void {
@@ -35,6 +35,9 @@ Init options:
   --organization <name>  Optional HF organization or user namespace
   --workspace <dir>      Workspace directory (default: .claude/hf-sessions)
   --no-images            Strip embedded images from redacted output
+  --visibility <mode>    Project visibility: "private" (default) or "oss". Private mode also redacts the
+                         git remote URL, GitHub user/repo, and commit SHA ranges in addition to the
+                         always-on attribution rules (cwd, project slug, blob storage host).
 
 Collect options:
   --workspace <dir>      Existing workspace (default: .claude/hf-sessions)
@@ -46,6 +49,8 @@ Collect options:
   --parallel <n>         Number of parallel LLM reviews (default: 1)
   --deny <file>|<regex>  Deny pattern: file with one regex per line, or a regex string (repeatable)
   --session <file>       Process a single session file (for testing)
+  --no-pii-scan          Skip LLM-assisted PII discovery (Haiku pre-pass)
+  --keep-project-name    Exclude the OSS project name from PII redaction
   [context-file...]      Project context files for the LLM review (default: README.md, CLAUDE.md, AGENTS.md if present; falls back to ~/.claude/CLAUDE.md)
 
 Review options:
@@ -86,6 +91,7 @@ export function parseInitArgs(args: string[]): InitOptions {
   let organization: string | undefined;
   let workspace = path.resolve(".claude/hf-sessions");
   let noImages = false;
+  let visibility: Visibility = "private";
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -94,6 +100,13 @@ export function parseInitArgs(args: string[]): InitOptions {
     else if (arg === "--organization") organization = requireValue(args, ++i, "--organization");
     else if (arg === "--workspace") workspace = path.resolve(requireValue(args, ++i, "--workspace"));
     else if (arg === "--no-images") noImages = true;
+    else if (arg === "--visibility") {
+      const value = requireValue(args, ++i, "--visibility");
+      if (value !== "oss" && value !== "private") {
+        throw new Error(`--visibility must be "oss" or "private" (got: ${value})`);
+      }
+      visibility = value;
+    }
     else throw new Error(`Unknown init option: ${arg}`);
   }
 
@@ -106,7 +119,7 @@ export function parseInitArgs(args: string[]): InitOptions {
   }
 
   const repoId = organization ? `${organization}/${repo}` : repo;
-  return { cwd, repo: repoId, workspace, noImages };
+  return { cwd, repo: repoId, workspace, noImages, visibility };
 }
 
 export function parseCollectArgs(args: string[]): CollectOptions {
@@ -118,6 +131,8 @@ export function parseCollectArgs(args: string[]): CollectOptions {
   let thinking: string | undefined;
   let parallel = 1;
   let session: string | undefined;
+  let noPiiScan = false;
+  let keepProjectName = false;
   const denyInputs: string[] = [];
   const contextFiles: string[] = [];
 
@@ -132,6 +147,8 @@ export function parseCollectArgs(args: string[]): CollectOptions {
     else if (arg === "--parallel") parallel = parseInt(requireValue(args, ++i, "--parallel"), 10);
     else if (arg === "--deny") denyInputs.push(requireValue(args, ++i, "--deny"));
     else if (arg === "--session") session = requireValue(args, ++i, "--session");
+    else if (arg === "--no-pii-scan") noPiiScan = true;
+    else if (arg === "--keep-project-name") keepProjectName = true;
     else contextFiles.push(arg);
   }
 
@@ -140,7 +157,7 @@ export function parseCollectArgs(args: string[]): CollectOptions {
   }
   if (parallel < 1 || !Number.isFinite(parallel)) parallel = 1;
 
-  return { workspace, envFile, secrets, force, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session };
+  return { workspace, envFile, secrets, force, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session, noPiiScan, keepProjectName };
 }
 
 export function parseReviewArgs(args: string[]): ReviewOptions {

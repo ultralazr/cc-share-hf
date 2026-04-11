@@ -7,11 +7,13 @@ This is a fork of [badlogic/pi-share-hf](https://github.com/badlogic/pi-share-hf
 It is an incremental pipeline for:
 
 1. collecting sessions for one project
-2. redacting exact secrets from your env file and `--secret`
-3. rejecting sessions that match user-provided deny patterns via `--deny`
-4. scanning redacted output with [TruffleHog](https://github.com/trufflesecurity/trufflehog) to detect and verify surviving secrets
-5. running LLM review on the remaining sessions
-6. uploading only sessions that pass all checks
+2. **PII discovery** via LLM pre-pass (Haiku) — finds names, emails, credentials, URLs
+3. **attribution redaction** — auto-redacts cwd, project slug, git remote, and more from workspace config
+4. redacting exact secrets from your env file and `--secret`
+5. rejecting sessions that match user-provided deny patterns via `--deny`
+6. scanning redacted output with [TruffleHog](https://github.com/trufflesecurity/trufflehog) to detect and verify surviving secrets
+7. running LLM review on the remaining sessions
+8. uploading only sessions that pass all checks
 
 Use it if you want to:
 
@@ -29,9 +31,12 @@ It keeps state in a workspace, so repeated runs only process what changed (updat
 ## Changes from upstream (pi-share-hf)
 
 - **Session source**: reads from `~/.claude/projects/` instead of `~/.pi/`
-- **Project dir naming**: `C:\DATA\projects\foo` → `C--DATA-projects-foo` (colons and backslashes → dashes)
+- **Project dir naming**: `C:\DATA\projects\foo` → `C--DATA-projects-foo` (colons, backslashes, and spaces → dashes)
 - **Session format**: handles Claude Code JSONL format (`user`/`assistant` roles, `tool_use`/`tool_result`/`thinking` content blocks, `media_type` for images) instead of Pi format
 - **Redactor**: detects images via `media_type` field (Claude Code) in addition to `mimeType` (Pi)
+- **PII discovery**: new LLM-assisted pre-pass using Haiku to dynamically find and redact sensitive data — see [PII discovery](#pii-discovery) below
+- **Attribution redaction**: new deterministic module that auto-derives redaction rules from workspace config — see [Attribution redaction](#attribution-redaction) below
+- **`--visibility` flag**: controls whether OSS-public or private-project attribution rules are applied
 - **Review runner**: uses `claude` CLI instead of Anthropic SDK; passes review prompt via stdin to avoid Windows cmd.exe 32k character argument limit; uses `--system-prompt` to prevent global CLAUDE.md auto-load from interfering with review
 - **Context files**: defaults to `README.md`, `CLAUDE.md`, `AGENTS.md` in project root; falls back to `~/.claude/CLAUDE.md` if none found
 - **`approve` command**: new command to manually approve sessions that failed LLM review after manual inspection
@@ -80,7 +85,7 @@ Use one workspace per OSS project. In your OSS project directory:
 
 1. add `.claude/hf-sessions/` to `.gitignore`
 2. run `cc-share-hf init` once
-3. run `cc-share-hf collect` to gather changed and new sessions, redact known secrets, filter by `--deny`, scan with TruffleHog, and run LLM review
+3. run `cc-share-hf collect` to gather changed and new sessions, run PII discovery, apply attribution redaction, redact known secrets, filter by `--deny`, scan with TruffleHog, and run LLM review
 4. inspect what would be uploaded with `cc-share-hf list --uploadable`, `cc-share-hf grep`, and the images folder if images are enabled
 5. reject anything you do not want published; manually approve sessions that LLM review wrongly blocked
 6. run `cc-share-hf upload`
@@ -100,11 +105,11 @@ echo ".claude/hf-sessions/" >> .gitignore
 Initialize once:
 
 ```bash
-# personal namespace
-cc-share-hf init --repo myuser/my-project-sessions
+# personal namespace, OSS project (public git remote is fine to keep)
+cc-share-hf init --repo myuser/my-project-sessions --visibility oss
 
-# or org namespace
-cc-share-hf init --repo my-project-sessions --organization myorg
+# private project (also redacts git remote, GitHub user/repo, commit SHAs)
+cc-share-hf init --repo myuser/my-sessions --visibility private
 ```
 
 Collect sessions:
@@ -173,34 +178,101 @@ Each uploaded row has four columns matching the Pi dataset structure:
 | `traces` | list | Array of parsed JSONL entries from the redacted session |
 | `file_name` | string | Original session filename (e.g. `abc123.jsonl`) |
 
-## What deterministic redaction does
+## Redaction pipeline
 
-It only knows exact secret values.
+cc-share-hf applies four distinct redaction layers in order. Each is independent; together they cover different classes of leaks.
+
+### 1. PII discovery
+
+**Not present in the original pi-share-hf.**
+
+Before any redaction, a Haiku pre-pass scans the natural language content of every session and extracts sensitive values it finds, including:
+
+- real person names (first, last, full)
+- company and client names — including abbreviations, domain variants, and derived identifiers (e.g. "Acme", "acmecorp", "acme.com" all captured as separate entries)
+- internal project codenames
+- email addresses and phone numbers
+- private or internal URLs (corporate dashboards, internal APIs, cloud console links)
+- passwords, API keys, tokens, and hardcoded credentials — even when embedded inside source code, config files, or test scripts (e.g. `TEST_PASSWORD = "..."`, `apiKey: "..."`, `Bearer ...`)
+
+Critically, the scanner also reads **tool call inputs** (what the assistant passed to `Write`, `Bash`, `Edit`, etc.), not just conversational text. This catches credentials that were written to files or executed as commands but never mentioned in plain prose.
+
+Discovered items are merged into `redact.csv` in the workspace with stable placeholders (`[PERSON_1]`, `[COMPANY_2]`, `[CREDENTIAL_1]`, etc.) and cached by session hash so unchanged sessions skip the LLM call on subsequent runs.
+
+The PII scan is skipped with `--no-pii-scan`. The OSS project name can be excluded from redaction with `--keep-project-name`.
+
+Workspace files created:
+
+```text
+.claude/hf-sessions/
+  redact.csv            discovered + user-defined find/replace pairs
+  redact-patterns.csv   regex patterns (email catch-all pre-populated)
+  pii/                  per-session discovery cache (*.pii.json)
+```
+
+You can also hand-edit `redact.csv` to add known sensitive values before running `collect`. The LLM-discovered items are merged in, not overwritten.
+
+### 2. Attribution redaction
+
+**Not present in the original pi-share-hf.**
+
+A deterministic module auto-derives redaction rules from the workspace config — no manual enumeration needed. Rules are split into two tiers controlled by `--visibility`.
+
+**Tier 1 — always applied (both `oss` and `private`):**
+
+| What | Placeholder | Why |
+| --- | --- | --- |
+| Raw `cwd` path (all slash variants) | `[PROJECT_ROOT]` | Appears on every session entry; reveals local filesystem layout |
+| Claude Code project slug (derived from cwd) | `[PROJECT_SLUG]` | Appears in session file paths and project dirs |
+| Vercel Blob storage host tokens | `[BLOB_HOST]` | Embed the project's private blob store ID |
+
+**Tier 2 — applied only for `--visibility private` (default):**
+
+| What | Placeholder | Why |
+| --- | --- | --- |
+| Git remote URL (`origin`) | `[GIT_REMOTE]` | Reveals repo identity for private repos |
+| GitHub `owner/repo` combined | `[GH_REPO]` | Shorter form also visible in git output |
+| GitHub owner (standalone) | `[GH_USER]` | Identifiable even without repo name |
+| Repo slug (standalone) | `[REPO]` | Same |
+| Commit SHA ranges (`abc..def`) | `[GIT_RANGE]` | Links sessions to specific commits in private history |
+
+For public OSS projects (`--visibility oss`), Tier 2 is skipped — the git remote and commit SHAs appear on GitHub anyway, so redacting them adds noise without benefit.
+
+Attribution pairs run before PII pairs. Longer strings always take precedence over shorter ones, so a full URL like `https://github.com/owner/repo.git` is replaced before standalone `owner` or `repo` tokens are processed.
+
+The attribution hash is included in the redaction cache key, so changing `--visibility` (e.g. re-init with `oss` instead of `private`) forces re-processing of all affected sessions.
+
+### 3. Exact-secret redaction
+
+This is the redaction layer present in the original pi-share-hf.
 
 Sources:
 
-- `--env-file` (default: `~/.zshrc`)
-- `--secret <file>` with one secret per line
-- `--secret <literal>`
+- `--env-file` (default: `~/.zshrc`) — all `export VAR=value` assignments
+- `--secret <file>` — one secret per line
+- `--secret <literal>` — a single literal value
 
-This is deliberate. Exact values are high precision. Generic token regexes are noisy. TruffleHog handles generic secret detection after redaction.
+Matched values are replaced with `[SECRET_VAR_NAME]` using exact string matching. This is high-precision and zero-noise. It only catches what you explicitly provided.
 
-## What TruffleHog does here
+### 4. TruffleHog scan
 
-TruffleHog scans the redacted output, not the original raw session.
+TruffleHog runs against the **already-redacted** output, not the raw session. At that point, exact secrets and LLM-discovered PII should already be gone. TruffleHog acts as a backstop for anything secret-like (API keys, tokens, credentials) that slipped through the earlier layers.
 
-That means:
+Any TruffleHog finding blocks the session from upload automatically.
 
-- exact secrets should already be gone
-- TruffleHog acts as a backstop for anything secret-like that survived
-
-Any TruffleHog finding blocks the session automatically.
-
-Per-session TruffleHog reports are stored in:
+Per-session reports are stored in:
 
 ```text
 .claude/hf-sessions/reports/<session>.trufflehog.json
 ```
+
+### Why this is safer than the original repo
+
+The original pi-share-hf relies only on layers 3 and 4 — static secret extraction from declared env vars and TruffleHog pattern matching. Both only catch what was anticipated in advance.
+
+cc-share-hf adds layers 1 and 2 on top, which are adaptive: PII discovery reads what is actually in the session content (including tool inputs) and extracts sensitive values the user never declared. Attribution redaction handles structural identifiers that are universal to every Claude Code session but invisible to pattern-based scanners.
+
+On a real-world session, these two additional layers produced **2,537 additional redactions** in a session that had already passed exact-secret and TruffleHog checks — including 2,499 occurrences of the raw filesystem path, 28 Vercel Blob host tokens, 4 git push URLs, and 4 commit SHA ranges.
 
 ## What the LLM review does
 
@@ -261,7 +333,7 @@ cc-share-hf grep -i 'gmail|calendar|drive|slack'
 
 ### `init`
 
-Creates `.claude/hf-sessions/`, writes `workspace.json`, and records which project directory maps to which Hugging Face dataset repo.
+Creates `.claude/hf-sessions/`, writes `workspace.json`, and records which project directory maps to which Hugging Face dataset repo. Also creates starter `redact.csv` and `redact-patterns.csv` files.
 
 ```bash
 cc-share-hf init --repo user/dataset
@@ -275,10 +347,11 @@ Main options:
 - `--organization <name>` optional namespace when `--repo` is a bare name
 - `--workspace <dir>` workspace dir, default `.claude/hf-sessions`
 - `--no-images` strip embedded images from redacted output
+- `--visibility <mode>` `private` (default) or `oss` — controls Tier 2 attribution rules
 
 ### `collect`
 
-Collects sessions for the configured project, redacts literal secrets, runs TruffleHog on changed redacted files, and runs the LLM review to write or update review sidecars.
+Collects sessions for the configured project, runs PII discovery, applies attribution redaction, redacts literal secrets, runs TruffleHog on changed redacted files, and runs the LLM review to write or update review sidecars.
 
 ```bash
 cc-share-hf collect [context-files...]
@@ -295,6 +368,8 @@ Main options:
 - `--parallel <n>` concurrent LLM reviews
 - `--deny <file>|<regex>` reject sessions matching this pattern
 - `--session <file>` process one session only
+- `--no-pii-scan` skip the Haiku PII discovery pre-pass
+- `--keep-project-name` exclude the OSS project name from PII redaction
 
 ### `review`
 
@@ -355,10 +430,14 @@ cc-share-hf upload
   manifest.local.jsonl
   remote-manifest.jsonl
   manifest.jsonl
+  redact.csv            LLM-discovered + user-defined PII pairs
+  redact-patterns.csv   regex redaction patterns
   redacted/       public candidate files
   reports/        private deterministic + TruffleHog reports
   review/         private LLM review sidecars
   review-chunks/  private transcript chunks
+  pii/            per-session PII discovery cache
+  images/         extracted images (if not stripped)
   reject.txt
   approve.txt
 ```

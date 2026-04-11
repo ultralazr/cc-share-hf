@@ -1,13 +1,50 @@
-import type { Finding, JsonObject, JsonValue, RedactionResult } from "./types.ts";
+import type { DetectorName, Finding, JsonObject, JsonValue, PiiPair, RedactionResult, RegexPattern, Severity } from "./types.ts";
 import { buildLiteralSecrets, countOccurrences } from "./secrets.ts";
+
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface PairGroup {
+  pairs: PiiPair[];
+  detector: DetectorName;
+  severity: Severity;
+}
+
+interface PatternGroup {
+  patterns: Array<{ regex: RegExp; replace: string }>;
+  detector: DetectorName;
+  severity: Severity;
+}
 
 export class Redactor {
   private readonly literalSecrets: Array<{ name: string; value: string; replacement: string }>;
   private readonly noImages: boolean;
+  private readonly pairGroups: PairGroup[];
+  private readonly patternGroups: PatternGroup[];
 
-  constructor(envFile: string, secrets: string[], noImages: boolean) {
+  constructor(
+    envFile: string,
+    secrets: string[],
+    noImages: boolean,
+    piiPairs: PiiPair[] = [],
+    regexPatterns: RegexPattern[] = [],
+    attributionPairs: PiiPair[] = [],
+    attributionPatterns: RegexPattern[] = [],
+  ) {
     this.literalSecrets = buildLiteralSecrets(envFile, secrets);
     this.noImages = noImages;
+    // Attribution runs BEFORE PII so the deterministic placeholders win when
+    // both would match the same span (e.g. cwd path containing the project
+    // name).
+    this.pairGroups = [
+      { pairs: sortLongest(attributionPairs), detector: "attribution-find-replace", severity: "high" },
+      { pairs: sortLongest(piiPairs), detector: "pii-find-replace", severity: "high" },
+    ];
+    this.patternGroups = [
+      { patterns: compilePatterns(attributionPatterns), detector: "attribution-regex", severity: "medium" },
+      { patterns: compilePatterns(regexPatterns), detector: "pii-regex", severity: "medium" },
+    ];
   }
 
   async redactEvent(event: JsonObject): Promise<RedactionResult> {
@@ -118,8 +155,57 @@ export class Redactor {
       }
     }
 
+    for (const group of this.pairGroups) {
+      for (const pair of group.pairs) {
+        const flags = pair.case_sensitive ? "g" : "gi";
+        const regex = new RegExp(escapeRegex(pair.find), flags);
+        let count = 0;
+        const newResult = result.replace(regex, () => { count++; return pair.replace; });
+        if (count > 0) {
+          findings.push({
+            detector: group.detector,
+            severity: group.severity,
+            jsonPath,
+            replacement: pair.replace,
+            count,
+            detail: pair.find,
+          });
+          result = newResult;
+        }
+      }
+    }
+
+    for (const group of this.patternGroups) {
+      for (const { regex, replace } of group.patterns) {
+        regex.lastIndex = 0;
+        let count = 0;
+        const newResult = result.replace(regex, () => { count++; return replace; });
+        if (count > 0) {
+          findings.push({
+            detector: group.detector,
+            severity: group.severity,
+            jsonPath,
+            replacement: replace,
+            count,
+          });
+          result = newResult;
+        }
+      }
+    }
+
     return { value: result, findings };
   }
+}
+
+function sortLongest(pairs: PiiPair[]): PiiPair[] {
+  return [...pairs].sort((a, b) => b.find.length - a.find.length);
+}
+
+function compilePatterns(patterns: RegexPattern[]): Array<{ regex: RegExp; replace: string }> {
+  return patterns.map(({ pattern, replace, flags }) => ({
+    regex: new RegExp(pattern, flags),
+    replace,
+  }));
 }
 
 function formatObjectKey(key: string): string {
