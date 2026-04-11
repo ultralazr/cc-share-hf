@@ -266,9 +266,9 @@ Per-session reports are stored in:
 .claude/hf-sessions/reports/<session>.trufflehog.json
 ```
 
-### Why this is safer than the original repo
+### Redaction approach rationale & differences to pi-share-hf
 
-The original pi-share-hf relies only on layers 3 and 4 — static secret extraction from declared env vars and TruffleHog pattern matching. Both only catch what was anticipated in advance.
+The original pi-share-hf relies on layers 3 and 4 — static secret extraction from declared env vars and TruffleHog pattern matching. Both catch what was anticipated in advance.
 
 cc-share-hf adds layers 1 and 2 on top, which are adaptive: PII discovery reads what is actually in the session content (including tool inputs) and extracts sensitive values the user never declared. Attribution redaction handles structural identifiers that are universal to every Claude Code session but invisible to pattern-based scanners.
 
