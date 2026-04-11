@@ -1,8 +1,8 @@
 # cc-share-hf
 
-Publish [Claude Code](https://claude.ai/code) coding agent sessions from one OSS project to a Hugging Face dataset.
+Publish Claude Code coding agent sessions from one OSS project to a Hugging Face dataset [(see example on Huggingface)](https://huggingface.co/datasets/ultralazr/claude-code-traces)
 
-This is a fork of [badlogic/pi-share-hf](https://github.com/badlogic/pi-share-hf) adapted to work with Claude Code session logs instead of Pi coding agent logs.
+This is a fork of [badlogic/pi-share-hf](https://github.com/badlogic/pi-share-hf) adapted to work with Claude Code session logs instead of Pi coding agent logs, applying additional redaction layers compared to the original repo.
 
 It is an incremental pipeline for:
 
