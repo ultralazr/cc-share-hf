@@ -98,7 +98,7 @@ export async function runUpload(options: UploadOptions): Promise<void> {
 
   const uploadDir = workspacePath(options.workspace, "_upload_staging");
   fs.rmSync(uploadDir, { recursive: true, force: true });
-  fs.mkdirSync(path.join(uploadDir, "data"), { recursive: true });
+  fs.mkdirSync(uploadDir, { recursive: true });
 
   const updatedManifest = new Map(remoteManifest);
   let staged = 0;
@@ -115,7 +115,7 @@ export async function runUpload(options: UploadOptions): Promise<void> {
     const localFile = workspacePath(options.workspace, "redacted", entry.file);
     if (!fs.existsSync(localFile)) continue;
 
-    fs.copyFileSync(localFile, path.join(uploadDir, "data", entry.file));
+    fs.copyFileSync(localFile, path.join(uploadDir, entry.file));
     updatedManifest.set(entry.file, {
       file: entry.file,
       source_hash: entry.source_hash,
@@ -131,6 +131,7 @@ export async function runUpload(options: UploadOptions): Promise<void> {
     .join("\n");
   fs.writeFileSync(path.join(uploadDir, REMOTE_MANIFEST_FILE), manifestContents.length > 0 ? `${manifestContents}\n` : "");
   fs.writeFileSync(path.join(uploadDir, "README.md"), await generateDatasetCard(config.cwd, repo, entries.length, approved, rejected + rejectedManual, unchanged));
+  fs.writeFileSync(path.join(uploadDir, ".gitattributes"), "*.jsonl filter=lfs diff=lfs merge=lfs -text\n");
 
   console.log(`${bold("Staged for upload:")} ${cyan(String(staged))}`);
   console.log(green("Uploading..."));
@@ -171,7 +172,7 @@ async function generateDatasetCard(
     "- config_name: default",
     "  data_files:",
     "  - split: train",
-    "    path: data/*.jsonl",
+    "    path: '*.jsonl'",
     "---",
     "",
     `# Claude Code session traces for ${repo}`,
@@ -182,7 +183,7 @@ async function generateDatasetCard(
     "",
     "## Data description",
     "",
-    "Each file in `data/` is a redacted Claude Code session in its native JSONL format (one entry per line). HuggingFace auto-converts these to Parquet with one row per session file and four columns:",
+    "Each file in the repo root is a redacted Claude Code session in its native JSONL format (one entry per line). HuggingFace auto-converts these to Parquet with one row per session file and four columns:",
     "",
     "| Column | Type | Description |",
     "| --- | --- | --- |",
@@ -229,5 +230,5 @@ function isUploadApproved(result: ChunkReviewResult): boolean {
 }
 
 async function uploadFolder(repo: string, localDir: string): Promise<void> {
-  await uploadDatasetFolder(repo, localDir, `pi-share-hf upload ${new Date().toISOString()}`);
+  await uploadDatasetFolder(repo, localDir, `cc-share-hf upload ${new Date().toISOString()}`);
 }
