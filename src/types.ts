@@ -49,6 +49,7 @@ export interface CollectOptions {
   session?: string;
   noPiiScan: boolean;
   keepProjectName: boolean;
+  yes: boolean;
 }
 
 export interface ReviewOptions {
@@ -59,6 +60,7 @@ export interface ReviewOptions {
   parallel: number;
   denyPatterns: RegExp[];
   session?: string;
+  yes: boolean;
 }
 
 export type TruffleHogFindingStatus = "verified" | "unverified" | "unknown";

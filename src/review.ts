@@ -153,7 +153,7 @@ export async function runReview(options: ReviewOptions): Promise<void> {
   console.log(`  ${bold("Already reviewed:")} ${skipped}`);
   console.log(`  ${bold("To review:")} ${cyan(String(workItems.length))}`);
 
-  const confirmed = await confirmPrompt("\nContinue with LLM review? (y/n) ");
+  const confirmed = options.yes || await confirmPrompt("\nContinue with LLM review? (y/n) ");
   if (!confirmed) {
     console.log("Aborted.");
     return;

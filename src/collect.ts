@@ -281,6 +281,7 @@ export async function runCollect(options: CollectOptions): Promise<void> {
     parallel: options.parallel,
     denyPatterns: options.denyPatterns,
     session: options.session,
+    yes: options.yes,
   };
   await runReview(reviewOptions);
 }

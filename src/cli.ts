@@ -133,6 +133,7 @@ export function parseCollectArgs(args: string[]): CollectOptions {
   let session: string | undefined;
   let noPiiScan = false;
   let keepProjectName = false;
+  let yes = false;
   const denyInputs: string[] = [];
   const contextFiles: string[] = [];
 
@@ -149,6 +150,7 @@ export function parseCollectArgs(args: string[]): CollectOptions {
     else if (arg === "--session") session = requireValue(args, ++i, "--session");
     else if (arg === "--no-pii-scan") noPiiScan = true;
     else if (arg === "--keep-project-name") keepProjectName = true;
+    else if (arg === "--yes" || arg === "-y") yes = true;
     else contextFiles.push(arg);
   }
 
@@ -157,7 +159,7 @@ export function parseCollectArgs(args: string[]): CollectOptions {
   }
   if (parallel < 1 || !Number.isFinite(parallel)) parallel = 1;
 
-  return { workspace, envFile, secrets, force, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session, noPiiScan, keepProjectName };
+  return { workspace, envFile, secrets, force, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session, noPiiScan, keepProjectName, yes };
 }
 
 export function parseReviewArgs(args: string[]): ReviewOptions {
@@ -166,6 +168,7 @@ export function parseReviewArgs(args: string[]): ReviewOptions {
   let thinking: string | undefined;
   let parallel = 1;
   let session: string | undefined;
+  let yes = false;
   const denyInputs: string[] = [];
   const contextFiles: string[] = [];
 
@@ -177,6 +180,7 @@ export function parseReviewArgs(args: string[]): ReviewOptions {
     else if (arg === "--parallel") parallel = parseInt(requireValue(args, ++i, "--parallel"), 10);
     else if (arg === "--deny") denyInputs.push(requireValue(args, ++i, "--deny"));
     else if (arg === "--session") session = requireValue(args, ++i, "--session");
+    else if (arg === "--yes" || arg === "-y") yes = true;
     else contextFiles.push(arg);
   }
 
@@ -186,7 +190,7 @@ export function parseReviewArgs(args: string[]): ReviewOptions {
 
   if (parallel < 1 || !Number.isFinite(parallel)) parallel = 1;
 
-  return { workspace, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session };
+  return { workspace, contextFiles, model, thinking, parallel, denyPatterns: loadDenyPatterns(denyInputs), session, yes };
 }
 
 export function parseUploadArgs(args: string[]): UploadOptions {
